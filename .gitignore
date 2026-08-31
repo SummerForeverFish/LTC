@@ -1,0 +1,11 @@
+# 构建中间产物与运行时二进制（均可从源码重建）
+*.obj
+*.lib
+*.exp
+*.pyd
+*.dll
+build.log
+build/
+
+# CTP 实盘凭证：含经纪商账号密码，禁止提交；模板见 ctp_settings.ini.example
+config/ctp_settings.ini
