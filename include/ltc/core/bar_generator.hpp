@@ -103,7 +103,8 @@ public:
     // 1) tick -> 1 分钟 K 线（实盘喂实时 tick；tick 回测引擎也走这里）
     // ------------------------------------------------------------------
     // 逐笔更新：同一分钟内只累加 high/low/close/volume；跨入新分钟时收口上一根
-    // （触发 on_bar），并以上一笔 tick 开出新 bar。bar.datetime 为该分钟起始毫秒。
+    // （触发 on_bar），并以上一笔 tick 开出新 bar。bar.datetime 为该分钟结束时刻
+    // （起始+60s，即收口时刻），贴近真实 K 线“以收盘价收口”的语义。
     void update_tick(const TickData& tick) {
         double price = tick.last_price;
         // 买卖一档均有效时取中间价（vnpy 口径，抹去单边报价噪声）；否则用最新价
@@ -127,7 +128,9 @@ public:
             bar_->open_interest = tick.open_interest;
             last_cum_volume_ = tick.volume;           // 记录累计量基准
         } else if (minute != bar_->datetime) {
-            // 跨入新分钟：收口上一根（close 已是最后一笔价格），触发 on_bar
+            // 跨入新分钟：收口上一根。datetime 由“起始分钟”改为“结束分钟”(起始+60s)，
+            // 即该根 1 分钟 K 收口时刻（close 已是最后一笔价格），再触发 on_bar
+            bar_->datetime = bar_->datetime + 60000;
             bar_->vt_symbol = bar_->to_vt_symbol();
             if (on_bar_) on_bar_(*bar_);
             bar_.reset();
@@ -154,25 +157,7 @@ public:
     void update_bar(const BarData& bar) {
         if (window_ <= 0 || !on_window_bar_) return;
 
-        if (!window_bar_) {
-            // 开新窗口：拷贝源 bar 元信息，datetime 取整（分钟窗口对齐）
-            window_bar_.reset(new BarData(bar));
-            window_bar_->interval = interval_;
-            window_bar_->datetime = aligned_start(bar.datetime);
-        } else {
-            // 并入当前窗口：只滚动 high/low/close，量与持仓累加/取新
-            if (bar.high > window_bar_->high) window_bar_->high = bar.high;
-            if (bar.low  < window_bar_->low)  window_bar_->low  = bar.low;
-            window_bar_->close = bar.close;
-            window_bar_->volume += bar.volume;
-            window_bar_->open_interest = bar.open_interest;
-        }
-
-        // 边界判断（源 bar 的收口时刻落在线上即完成一个窗口）：
-        //   分钟单位：bar.datetime 的"分钟位"对 window 取模为 0；
-        //   小时单位：分钟位为 0（整点 bar 收口上一小时窗口），
-        //             window>1 时再要求小时位对 window 取模为 0（如 4 小时线）；
-        //   日单位：源 bar 日期与窗口首根不同（跨日即收口上一交易日的窗口）。
+        // 先算边界（日线收口时若用新一天 bar 的 datetime 会污染窗口标签，需在此之前判定）
         bool finished = false;
         if (interval_ == Interval::MINUTE) {
             finished = (minute_of_hour(bar.datetime) % window_) == 0;
@@ -180,7 +165,24 @@ public:
             if (minute_of_hour(bar.datetime) == 0)
                 finished = (window_ <= 1) || ((hour_of_day(bar.datetime) % window_) == 0);
         } else if (interval_ == Interval::DAILY) {
-            finished = day_index(bar.datetime) != day_index(window_bar_->datetime);
+            finished = window_bar_ && day_index(bar.datetime) != day_index(window_bar_->datetime);
+        }
+
+        if (!window_bar_) {
+            // 开新窗口：拷贝源 bar 元信息，datetime 先对齐到窗口起点（随后会被推进到收口时刻）
+            window_bar_.reset(new BarData(bar));
+            window_bar_->interval = interval_;
+            window_bar_->datetime = aligned_start(bar.datetime);
+        } else {
+            // 并入当前窗口：滚动 high/low/close，量与持仓累加/取新；
+            // 并把窗口 datetime 推进到“收口那根”的结束时间（日线跨日收口时除外，保留上一交易日标签）
+            if (bar.high > window_bar_->high) window_bar_->high = bar.high;
+            if (bar.low  < window_bar_->low)  window_bar_->low  = bar.low;
+            window_bar_->close = bar.close;
+            window_bar_->volume += bar.volume;
+            window_bar_->open_interest = bar.open_interest;
+            if (!(interval_ == Interval::DAILY && finished))
+                window_bar_->datetime = bar.datetime;
         }
 
         if (finished) {

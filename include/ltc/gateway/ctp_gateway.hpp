@@ -390,6 +390,16 @@ inline void CtpGateway::on_rtn_depth_market_data(CThostFtdcDepthMarketDataField*
     TickData tk;
     tk.symbol   = cstr(p->InstrumentID);
     tk.exchange = ctp_exchange(p->ExchangeID);
+    // CTP 行情的 ExchangeID 常为空格/空串，无法据此推断交易所；用已订阅列表
+    // (symbol.exchange 形式) 反查兜底，使 vt_symbol 不再变成 "rbXXXX.NONE"。
+    if (tk.exchange == Exchange::NONE) {
+        for (auto& vt : subscribed_) {
+            if (ctp_inst_id(vt) == tk.symbol) {
+                auto pos = vt.find('.');
+                if (pos != std::string::npos) { tk.exchange = ctp_exchange(vt.c_str() + pos + 1); break; }
+            }
+        }
+    }
     tk.vt_symbol = make_vt_symbol(tk.symbol, tk.exchange);
     tk.datetime = ctp_time_to_ms(p->TradingDay, p->UpdateTime, p->UpdateMillisec);
     tk.last_price = p->LastPrice;

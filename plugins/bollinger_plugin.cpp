@@ -46,6 +46,7 @@ public:
           bg_(std::bind(&BollingerStrategy::on_bar, this, std::placeholders::_1)) {}
 
     void on_init() override {
+
         Logger::log(Logger::Level::INFO, name() + " [插件] 布林带初始化 window=" +
                     std::to_string(window_) + " k=" + std::to_string(k_) +
                     " vol=" + std::to_string(vol_) + " live=" + std::to_string(live_));
@@ -60,6 +61,7 @@ public:
 
     // K线回调（信号核心）：由 BarGenerator 收口 1 分钟 Bar 后回调，或直接由 bar 级回测引擎调用。
     void on_bar(const BarData& bar) override {
+        Logger::log(Logger::Level::INFO, name() + " [插件] 1分钟收口 bar=" + std::to_string(bar.close));
         closes_.push_back(bar.close);
         if ((int)closes_.size() > window_ + 5) closes_.pop_front();
         if ((int)closes_.size() < window_) return;
@@ -71,17 +73,17 @@ public:
 
         if (pos_ == 0.0) {
             if (bar.close < lower) {
-                if (live_) buy(bar.vt_symbol, bar.close, vol_, OrderType::MARKET);
+                if (live_) buy(bar.vt_symbol, bar.close, vol_, OrderType::LIMIT);
                 else log_dry("触下轨 BUY", bar.close);
             } else if (bar.close > upper) {
-                if (live_) short_(bar.vt_symbol, bar.close, vol_, OrderType::MARKET);
+                if (live_) short_(bar.vt_symbol, bar.close, vol_, OrderType::LIMIT);
                 else log_dry("触上轨 SHORT", bar.close);
             }
         } else if (pos_ > 0.0 && bar.close > mid) {
-            if (live_) sell(bar.vt_symbol, bar.close, vol_, OrderType::MARKET);
+            if (live_) sell(bar.vt_symbol, bar.close, vol_, OrderType::LIMIT);
             else log_dry("回中轨 SELL", bar.close);
         } else if (pos_ < 0.0 && bar.close < mid) {
-            if (live_) cover(bar.vt_symbol, bar.close, vol_, OrderType::MARKET);
+            if (live_) cover(bar.vt_symbol, bar.close, vol_, OrderType::LIMIT);
             else log_dry("回中轨 COVER", bar.close);
         }
     }
