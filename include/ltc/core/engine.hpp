@@ -21,6 +21,9 @@
 #include <memory>
 #include <vector>
 #include <mutex>
+#include <thread>
+#include <atomic>
+#include <chrono>
 
 #include "ltc/core/object.hpp"
 #include "ltc/core/event.hpp"
@@ -67,6 +70,7 @@ public:
             register_strategy_events(st);
         }
         event_engine_->start();
+        start_timer();   // 周期投递 TIMER 事件，驱动策略 on_timer / 算法交易
         for (auto& kv : strategies_) {
             auto st = kv.second;
             st->on_init();
@@ -76,16 +80,21 @@ public:
         running_ = true;
     }
 
-    // 停止：先 on_stop 收尾，再关接口，最后停事件引擎线程。
+    // 停止：先 handle_stop 收尾（停算法撤单 + 用户 on_stop），再关接口，最后停定时器与事件引擎线程。
     void stop() {
         running_ = false;
-        for (auto& kv : strategies_) kv.second->on_stop();
+        for (auto& kv : strategies_) kv.second->handle_stop();
         for (auto& kv : gateways_) kv.second->close();
+        stop_timer();
         event_engine_->stop();
     }
 
     bool is_running() const { return running_; }
     std::shared_ptr<EventEngine> event_engine() { return event_engine_; }
+
+    // 定时器节拍（毫秒）：决定 on_timer 被调用的频率，默认 500ms。
+    void set_timer_interval(int ms) { timer_interval_ms_ = ms > 0 ? ms : 500; }
+    int timer_interval() const { return timer_interval_ms_; }
 
     // ---- OrderRouter 实现 ----
     // OrderRouter 实现：把委托路由到对应接口（resolve_gateway）；无可用接口返回空串。
@@ -108,6 +117,23 @@ public:
     }
 
 private:
+    // 定时器线程：周期向事件引擎投递 TIMER 事件（payload 为毫秒时间戳）。
+    void start_timer() {
+        if (timer_running_.exchange(true)) return;
+        timer_thread_ = std::thread([this]() {
+            while (timer_running_.load()) {
+                int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+                event_engine_->put(Event{EventType::TIMER, now});
+                std::this_thread::sleep_for(std::chrono::milliseconds(timer_interval_ms_));
+            }
+        });
+    }
+    void stop_timer() {
+        if (!timer_running_.exchange(false)) return;
+        if (timer_thread_.joinable()) timer_thread_.join();
+    }
+
     // 选路：当前实现所有接口由同一默认网关处理（按交易所细分见各 gateway）；
     // 找不到时返回 nullptr，由 send_order 报错。保留 ex 参数以便后续按交易所分流。
     BaseGateway* resolve_gateway(Exchange ex) {
@@ -131,6 +157,10 @@ private:
     std::map<std::string, std::shared_ptr<BaseStrategy>> strategies_;
     std::string default_gateway_;
     bool running_ = false;
+
+    std::thread timer_thread_;
+    std::atomic<bool> timer_running_{false};
+    int timer_interval_ms_ = 500;
 };
 
 } // namespace ltc

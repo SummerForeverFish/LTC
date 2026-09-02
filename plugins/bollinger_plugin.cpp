@@ -12,7 +12,7 @@
 //   cl /nologo /std:c++17 /utf-8 /EHsc /O2 /DWIN32_LEAN_AND_MEAN /DNOMINMAX
 //      /LD /DLTC_PLUGIN_BUILD /I . /I include
 //      /Fe:plugins/bollinger_plugin.dll /Fo:build\ plugins/bollinger_plugin.cpp
-
+//cd D:\files\app\trade_c\vncpp && powershell -File build.ps1 2>&1 | findstr /i "bollinger plugin EXIT LNK error C"; echo "DONE=$LASTEXITCODE"
 // LTC_PLUGIN_BUILD 必须在 include plugin_abi.h 之前定义，才会 dllexport 下列 C 函数。
 // MSVC 因重复定义宏可能报 C4005，属无害重定义警告，可忽略。
 #define LTC_PLUGIN_BUILD
@@ -40,16 +40,27 @@ namespace {
 // 信号核心在 on_bar；on_tick 仅把 tick 喂给 BarGenerator 合成 1 分钟 K 线。
 class BollingerStrategy : public BaseStrategy {
 public:
-    BollingerStrategy(const std::string& name, int window, double k, double vol, bool live)
+    BollingerStrategy(const std::string& name, int window, double k, double vol, bool live,
+                      const std::string& vt_symbol = "")
         : BaseStrategy(name), window_(window), k_(k), vol_(vol), live_(live),
+          vt_symbol_(vt_symbol),
           // K 线合成器：tick -> 1 分钟 Bar，收口后回调本策略 on_bar（信号核心）
           bg_(std::bind(&BollingerStrategy::on_bar, this, std::placeholders::_1)) {}
 
     void on_init() override {
-
         Logger::log(Logger::Level::INFO, name() + " [插件] 布林带初始化 window=" +
                     std::to_string(window_) + " k=" + std::to_string(k_) +
                     " vol=" + std::to_string(vol_) + " live=" + std::to_string(live_));
+        // 载入本策略持仓（持久化自 JSON，重启也能恢复；非账户持仓）
+        // get_strategy_pos 用法一致：有持仓只平仓、不开仓。
+        
+        PositionInfo p = get_strategy_pos(vt_symbol_);
+        pos_ = p.volume;
+        avg_price_ = p.avg_price;
+        Logger::log(Logger::Level::INFO, name() + " [插件] 载入 " + vt_symbol_ +
+                    " 持仓=" + std::to_string(pos_) +
+                    " 开仓均价=" + std::to_string(avg_price_));
+        
     }
 
     // tick 回调：逐笔喂给 BarGenerator，跨分钟时其内部收口 1 分钟 Bar 并同步回调 on_bar。
@@ -71,7 +82,13 @@ public:
         double upper = mid + k_ * sigma;
         double lower = mid - k_ * sigma;
 
-        if (pos_ == 0.0) {
+        // 当前策略持仓（持久化自 JSON，重启也能恢复；非账户持仓）
+        PositionInfo pi = get_strategy_pos(bar.vt_symbol);
+        double pos = pi.volume;
+        pos_ = pos;                  // 同步到内存，便于日志
+        avg_price_ = pi.avg_price;   // 同步开仓均价
+
+        if (pos == 0.0) {
             if (bar.close < lower) {
                 if (live_) buy(bar.vt_symbol, bar.close, vol_, OrderType::LIMIT);
                 else log_dry("触下轨 BUY", bar.close);
@@ -79,23 +96,31 @@ public:
                 if (live_) short_(bar.vt_symbol, bar.close, vol_, OrderType::LIMIT);
                 else log_dry("触上轨 SHORT", bar.close);
             }
-        } else if (pos_ > 0.0 && bar.close > mid) {
+        } else if (pos > 0.0 && bar.close > mid) {
             if (live_) sell(bar.vt_symbol, bar.close, vol_, OrderType::LIMIT);
             else log_dry("回中轨 SELL", bar.close);
-        } else if (pos_ < 0.0 && bar.close < mid) {
+        } else if (pos < 0.0 && bar.close < mid) {
             if (live_) cover(bar.vt_symbol, bar.close, vol_, OrderType::LIMIT);
             else log_dry("回中轨 COVER", bar.close);
         }
     }
 
     void on_trade(const TradeData& td) override {
+        double old = pos_;
         if (td.direction == Direction::LONG  && td.offset == Offset::OPEN)        pos_ += td.volume;
         else if (td.direction == Direction::SHORT && td.offset == Offset::OPEN)    pos_ -= td.volume;
         else if (td.direction == Direction::LONG  && td.offset == Offset::CLOSE)   pos_ += td.volume;  // 平空：买回，净持仓回正
         else if (td.direction == Direction::SHORT && td.offset == Offset::CLOSE)   pos_ -= td.volume;  // 平多：卖出，净持仓回零
+        // 开仓均价：新开仓时记录成交价；平仓归零时清空（本策略不金字塔加仓，加权可省略）
+        if (old == 0.0 && pos_ != 0.0) avg_price_ = td.price;
+        else if (pos_ == 0.0)            avg_price_ = 0.0;
+        // 持久化到 JSON（按策略名隔离，多策略互不覆盖）
+        save_position(td.vt_symbol, pos_, avg_price_);
         Logger::log(Logger::Level::INFO, name() + " [插件] 成交 " +
                     direction_to_str(td.direction) + " @" + std::to_string(td.price) +
-                    " vol=" + std::to_string(td.volume) + " pos=" + std::to_string(pos_));
+                    " vol=" + std::to_string(td.volume) +
+                    " pos=" + std::to_string(pos_) +
+                    " avg=" + std::to_string(avg_price_));
     }
 
     void on_order(const OrderData& o) override {
@@ -129,8 +154,10 @@ private:
     int window_;
     double k_, vol_;
     bool live_;
+    std::string vt_symbol_;   // 可选：指定合约后 on_init 时载入持久化持仓
     std::deque<double> closes_;
     double pos_ = 0.0;
+    double avg_price_ = 0.0;   // 开仓均价（持久化到 JSON）
     BarGenerator bg_;   // vnpy 风格 K 线合成器：tick -> 1 分钟 Bar
 };
 
@@ -153,7 +180,8 @@ LTC_PLUGIN_EXPORT void* ltc_plugin_create(const char* type, const char* name, co
                                     param_int(p, "window", 20),
                                     param_double(p, "k", 2.0),
                                     param_double(p, "vol", 1.0),
-                                    param_bool(p, "live", false));
+                                    param_bool(p, "live", false),
+                                    param_str(p, "vt_symbol", ""));
     return static_cast<void*>(s);
 }
 

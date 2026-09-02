@@ -120,6 +120,10 @@ public:
     std::optional<ContractData> get_contract(const std::string& vt_symbol) const;
     std::vector<ContractData> all_contracts() const;
 
+    // 最新行情缓存：TICK 事件到达时按 vt_symbol 覆盖保存（见 dispatch），供策略/算法
+    // 在 on_timer 等时机查询最新行情。未收到过行情返回 std::nullopt（Python 端为 None）。
+    std::optional<TickData> get_tick(const std::string& vt_symbol) const;
+
 private:
     void run();
     void dispatch(Event& ev);
@@ -140,6 +144,10 @@ private:
     // 故用互斥锁保护（引擎线程写、查询线程读，低竞争）。
     std::map<std::string, ContractData> contracts_;
     mutable std::mutex contract_mutex_;
+
+    // 最新行情缓存：TICK 事件按 vt_symbol 覆盖写入，查询线程读取，用互斥锁保护。
+    std::map<std::string, TickData> ticks_;
+    mutable std::mutex tick_mutex_;
 };
 
 } // namespace ltc

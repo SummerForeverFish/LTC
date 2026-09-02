@@ -9,6 +9,10 @@
 // 已知限制：SPI 回调在 CTP 线程触发，目前直接回调网关（未强制切回事件线程）；
 //           查询全部合约/账户后未做分页/节流；登录链未做断线重连。
 #pragma once
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 #include <string>
 #include <map>
 #include <vector>
@@ -16,6 +20,7 @@
 #include <mutex>
 #include <atomic>
 #include <cstring>
+#include <cmath>
 #include <chrono>
 #include <ctime>
 
@@ -56,8 +61,22 @@ inline void set_field(char* dst, size_t n, const std::string& src) {
     std::memset(dst, 0, n);
     if (!src.empty()) std::strncpy(dst, src.c_str(), n - 1);
 }
-// 安全转换 C 字符串（NULL -> 空串）
-inline std::string cstr(const char* p) { return p ? std::string(p) : std::string(); }
+// CTP 返回的中文字段（错误信息/合约名等）为 GBK(代码页936) 编码，
+// 统一转成 UTF-8 再送入日志/数据，避免控制台/文件出现乱码。
+inline std::string gbk_to_utf8(const char* src) {
+    if (!src || !*src) return std::string();
+    int wlen = ::MultiByteToWideChar(936, 0, src, -1, nullptr, 0);
+    if (wlen <= 0) return std::string(src);             // 转换失败则原样返回
+    std::wstring wbuf(static_cast<size_t>(wlen), L'\0');
+    ::MultiByteToWideChar(936, 0, src, -1, &wbuf[0], wlen);
+    int blen = ::WideCharToMultiByte(CP_UTF8, 0, wbuf.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (blen <= 0) return std::string(src);
+    std::string out(static_cast<size_t>(blen) - 1, '\0');
+    ::WideCharToMultiByte(CP_UTF8, 0, wbuf.c_str(), -1, &out[0], blen, nullptr, nullptr);
+    return out;
+}
+// 安全转换 C 字符串（NULL -> 空串）；CTP 字段均为 GBK，统一转 UTF-8
+inline std::string cstr(const char* p) { return p ? gbk_to_utf8(p) : std::string(); }
 
 // 从 vt_symbol("rb2609.SHFE") 提取 CTP 订阅所需的合约代码("rb2609")
 // CTP MdApi::SubscribeMarketData 只接受交易所合约代码，不含交易所后缀(".SHFE")
@@ -188,6 +207,8 @@ private:
     int  req_id_ = 0;
 
     std::vector<std::string> subscribed_;
+    // symbol -> 最小变动价位(price tick)，合约查询后缓存，供下单限价取整
+    std::map<std::string, double> price_tick_;
     std::atomic<bool> inited_;
     std::atomic<bool> md_logged_in_{false};
     std::mutex mtx_;
@@ -507,6 +528,7 @@ inline void CtpGateway::on_rsp_qry_instrument(CThostFtdcInstrumentField* p, CTho
         c.product = ctp_product(p->ProductClass);
         c.size = p->VolumeMultiple;
         c.pricetick = p->PriceTick;
+        price_tick_[c.symbol] = c.pricetick;  // 缓存 tick，供下单限价取整
         c.min_volume = p->MinLimitOrderVolume;
         c.max_volume = p->MaxLimitOrderVolume;
         // 净持仓(单向)模式：上期/中金/能源中心按净持仓，大商/郑商按多空双向
@@ -573,6 +595,10 @@ inline std::string CtpGateway::send_order(const OrderRequest& req) {
     o.CombHedgeFlag[0]  = THOST_FTDC_HF_Speculation; o.CombHedgeFlag[1] = '\0';
     o.OrderPriceType = (req.type == OrderType::MARKET) ? THOST_FTDC_OPT_AnyPrice : THOST_FTDC_OPT_LimitPrice;
     o.LimitPrice = req.price;
+    // 按合约最小变动价位取整，避免「价格非最小报单倍数」被柜台拒单
+    auto pit = price_tick_.find(symbol);
+    if (pit != price_tick_.end() && pit->second > 0)
+        o.LimitPrice = std::round(o.LimitPrice / pit->second) * pit->second;
     o.VolumeTotalOriginal = (int)req.volume;
     o.TimeCondition = THOST_FTDC_TC_GFD;
     o.VolumeCondition = THOST_FTDC_VC_AV;

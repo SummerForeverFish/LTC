@@ -98,6 +98,10 @@ void EventEngine::dispatch(Event& ev) {
     switch (ev.type) {
         case EventType::TICK: {
             const auto& d = std::get<TickData>(ev.data);
+            {   // 缓存最新行情，供策略/算法在 on_timer 等时机查询
+                std::lock_guard<std::mutex> lk(tick_mutex_);
+                ticks_[d.to_vt_symbol()] = d;
+            }
             for (auto* s : tick_strategies_) s->on_tick(d);
             break;
         }
@@ -108,17 +112,17 @@ void EventEngine::dispatch(Event& ev) {
         }
         case EventType::ORDER: {
             const auto& d = std::get<OrderData>(ev.data);
-            for (auto* s : order_strategies_) s->on_order(d);
+            for (auto* s : order_strategies_) s->handle_order(d);
             break;
         }
         case EventType::TRADE: {
             const auto& d = std::get<TradeData>(ev.data);
-            for (auto* s : trade_strategies_) s->on_trade(d);
+            for (auto* s : trade_strategies_) s->handle_trade(d);
             break;
         }
         case EventType::TIMER: {
             const auto& d = std::get<int64_t>(ev.data);
-            for (auto* s : timer_strategies_) s->on_timer(d);
+            for (auto* s : timer_strategies_) s->handle_timer(d);
             break;
         }
         case EventType::CONTRACT: {
@@ -145,6 +149,20 @@ std::optional<ContractData> EventEngine::get_contract(const std::string& vt_symb
     // 如 "rb2609" 也能命中已存的 "rb2609.SHFE"；同 symbol 多交易所时取首个匹配。
     if (vt_symbol.find('.') == std::string::npos) {
         for (const auto& kv : contracts_) {
+            if (kv.second.symbol == vt_symbol) return kv.second;
+        }
+    }
+    return std::nullopt;
+}
+
+// 按 vt_symbol 查询最新行情缓存；未收到过行情返回 std::nullopt。
+std::optional<TickData> EventEngine::get_tick(const std::string& vt_symbol) const {
+    std::lock_guard<std::mutex> lk(tick_mutex_);
+    auto it = ticks_.find(vt_symbol);
+    if (it != ticks_.end()) return it->second;
+    // 兜底：无交易所后缀时按 symbol 模糊匹配
+    if (vt_symbol.find('.') == std::string::npos) {
+        for (const auto& kv : ticks_) {
             if (kv.second.symbol == vt_symbol) return kv.second;
         }
     }

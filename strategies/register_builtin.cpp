@@ -12,6 +12,7 @@
 #include "strategies/ctp_demo_strategy.hpp"
 #include "strategies/tick_demo_strategy.hpp"
 #include "strategies/bollinger_strategy.hpp"
+#include "strategies/twap_demo_strategy.hpp"
 
 namespace ltc {
 namespace {
@@ -50,6 +51,22 @@ LTC_REGISTER_STRATEGY(
         return std::make_shared<BollingerStrategy>(
             n, param_int(p, "window", 20), param_double(p, "k", 2.0),
             param_double(p, "vol", 1.0));
+    });
+
+// TwapDemo：TWAP 算法拆单演示。参数 vt_symbol,target_pos,price,slip_point,chase_time,n_intervals,epochs,live
+LTC_REGISTER_STRATEGY(
+    "TwapDemo", "TWAP算法拆单  参数: vt_symbol,target_pos,price,slip_point,chase_time,n_intervals,epochs,live",
+    [](const std::string& n, const StrategyParams& p) -> std::shared_ptr<BaseStrategy> {
+        return std::make_shared<TwapDemoStrategy>(
+            n,
+            param_str(p, "vt_symbol", "rb2610.SHFE"),
+            param_double(p, "target_pos", 5.0),
+            param_double(p, "price", 0.0),
+            param_int(p, "slip_point", 0),
+            param_double(p, "chase_time", 5.0),
+            param_int(p, "n_intervals", 4),
+            param_int(p, "epochs", 6),
+            param_bool(p, "live", false));
     });
 
 } // namespace

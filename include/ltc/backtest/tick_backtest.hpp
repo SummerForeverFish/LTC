@@ -97,7 +97,10 @@ public:
         return !ticks_.empty();
     }
 
-    void add_strategy(std::shared_ptr<BaseStrategy> st) { strategy_ = st; }
+    void add_strategy(std::shared_ptr<BaseStrategy> st) {
+        strategy_ = st;
+        st->set_persist(false);   // 回测只维护内存持仓账本，不写实盘 JSON
+    }
 
     // 启用 K 线合成：把逐笔 tick 用 BarGenerator 聚合为指定周期 K 线，
     // 收口后回调策略 on_bar（策略同时仍会收到每笔 on_tick）。
@@ -175,14 +178,14 @@ public:
         o.status = Status::SUBMITTED;
         o.datetime = ticks_.empty() ? now_ms() : ticks_.back().datetime;
         pending_[vt_oid] = o;
-        strategy_->on_order(o);
+        strategy_->handle_order(o);
         return vt_oid;
     }
     void cancel_order(const CancelRequest& req) override {
         auto it = pending_.find(req.vt_orderid);
         if (it != pending_.end()) {
             it->second.status = Status::CANCELLED;
-            strategy_->on_order(it->second);
+            strategy_->handle_order(it->second);
             pending_.erase(it);
         }
     }
@@ -235,8 +238,8 @@ private:
 
             apply_trade(td);
             o.status = Status::ALLTRADED; o.traded = o.volume; o.price = fp;
-            strategy_->on_order(o);
-            strategy_->on_trade(td);
+            strategy_->handle_order(o);
+            strategy_->handle_trade(td);
             pending_.erase(it);
             ++trade_count_;
         }

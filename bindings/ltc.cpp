@@ -43,6 +43,7 @@
 #include "ltc/core/config.hpp"
 #include "ltc/core/strategy_registry.hpp"
 #include "ltc/core/plugin_loader.hpp"
+#include "ltc/algo/algo_base.hpp"
 
 namespace nb = nanobind;
 using namespace ltc;
@@ -235,6 +236,11 @@ NB_MODULE(ltc, m) {
         .def_rw("gateway_name", &ContractData::gateway_name);
 
     // ---------- 策略基类（可继承）----------
+    // 持仓快照：净持仓(正负表多/空) + 开仓均价（由框架按成交自动维护）
+    nb::class_<PositionInfo>(m, "PositionInfo")
+        .def_ro("volume", &PositionInfo::volume)
+        .def_ro("avg_price", &PositionInfo::avg_price);
+
     nb::class_<BaseStrategy, PyStrategy>(m, "Strategy")
         .def(nb::init<const std::string&>(), nb::arg("name"))
         .def("on_init", &BaseStrategy::on_init)
@@ -259,6 +265,40 @@ NB_MODULE(ltc, m) {
         .def("cancel", &BaseStrategy::cancel, nb::arg("vt_orderid"))
         .def("subscribe", &BaseStrategy::subscribe, nb::arg("vt_symbol"),
              "订阅行情：vt_symbol 形如 'rb2609.SHFE'，转发到引擎默认接口")
+        .def("get_strategy_pos", &BaseStrategy::get_strategy_pos, nb::arg("vt_symbol"))
+        .def("save_position", &BaseStrategy::save_position, nb::arg("vt_symbol"),
+             nb::arg("volume"), nb::arg("avg_price"))
+        .def("get_tick", &BaseStrategy::get_tick, nb::arg("vt_symbol"))
+        .def("has_active_orders", &BaseStrategy::has_active_orders, nb::arg("vt_symbol"))
+        .def("cancel_symbol", &BaseStrategy::cancel_symbol, nb::arg("vt_symbol"))
+        .def("write_log", &BaseStrategy::write_log, nb::arg("msg"))
+        .def("send_target_pos_twap", &BaseStrategy::send_target_pos_twap,
+             nb::arg("vt_symbol"), nb::arg("target_pos"),
+             nb::arg("price") = 0.0, nb::arg("slip_point") = 0,
+             nb::arg("chase_time") = 30.0, nb::arg("n_intervals") = 3,
+             nb::arg("epochs") = 8,
+             "TWAP 拆单：把持仓调到 target_pos（基类内置，on_timer 自动驱动，无需手动）")
+        .def("send_target_pos_vp", &BaseStrategy::send_target_pos_vp,
+             nb::arg("vt_symbol"), nb::arg("target_pos"),
+             nb::arg("price") = 0.0, nb::arg("slip_point") = 0,
+             nb::arg("chase_time") = 30.0, nb::arg("n_intervals") = 3,
+             nb::arg("epochs") = 8,
+             nb::arg("volume_profile") = std::vector<double>{},
+             "VWAP 按占比拆单：volume_profile 为空时均分")
+        .def("send_target_pos_iceberg", &BaseStrategy::send_target_pos_iceberg,
+             nb::arg("vt_symbol"), nb::arg("target_pos"),
+             nb::arg("price") = 0.0, nb::arg("slip_point") = 0,
+             nb::arg("chase_time") = 10.0, nb::arg("n_intervals") = 5,
+             nb::arg("epochs") = 8,
+             "Iceberg 冰山算法：大单拆小单逐笼下，不追价")
+        .def("send_target_pos_midpeg", &BaseStrategy::send_target_pos_midpeg,
+             nb::arg("vt_symbol"), nb::arg("target_pos"),
+             nb::arg("price") = 0.0, nb::arg("slip_point") = 0,
+             nb::arg("chase_time") = 10.0, nb::arg("n_intervals") = 3,
+             nb::arg("epochs") = 8,
+             "MidPeg 中间价算法：买卖中间价委托，不追价")
+        .def("stop_algo", &BaseStrategy::stop_algo, nb::arg("vt_symbol"))
+        .def("stop_all_algos", &BaseStrategy::stop_all_algos)
         .def_prop_ro("name", &BaseStrategy::name);
 
     // ---------- K 线合成器（vnpy BarGenerator 风格）----------
@@ -401,6 +441,75 @@ NB_MODULE(ltc, m) {
         .def("get_bool", &IniConfig::get_bool, nb::arg("section"), nb::arg("key"),
              nb::arg("def") = false)
         .def("last_error", &IniConfig::last_error);
+
+    // ---------- 算法交易下单模块（AlgoBase 系列）----------
+    // Python 策略用法：
+    //   class MyStrat(v.Strategy):
+    //       def __init__(self, name):
+    //           super().__init__(name)
+    //           self.twap = v.TWAPAlgo(self)     # 绑定当前策略
+    //       def on_timer(self, t):
+    //           self.twap.on_timer(t)            # 定时器节拍驱动
+    //       def on_start(self):
+    //           self.twap.start(self.vt_symbol, 5.0, chase_time=10, n_intervals=4, epochs=6)
+    // 说明：构造函数接受一个策略实例（self），算法通过策略的 buy/sell/get_tick/
+    //       get_strategy_pos/has_active_orders/cancel_symbol/write_log 工作。
+    nb::class_<algo::TWAPAlgo>(m, "TWAPAlgo")
+        .def(nb::init<BaseStrategy*>(), nb::arg("strategy"),
+             "绑定一个策略实例（传入 self）")
+        .def("start", &algo::TWAPAlgo::start,
+             nb::arg("vt_symbol"), nb::arg("target_pos"),
+             nb::arg("price") = 0.0, nb::arg("slip_point") = 0,
+             nb::arg("chase_time") = 30.0, nb::arg("n_intervals") = 3,
+             nb::arg("epochs") = 8,
+             "启动 TWAP：把持仓调到 target_pos，拆 n_intervals 笼、最多 epochs 轮")
+        .def("on_timer", &algo::TWAPAlgo::on_timer, nb::arg("now_ms"))
+        .def("is_active", &algo::TWAPAlgo::is_active, nb::arg("vt_symbol"))
+        .def("stop", &algo::TWAPAlgo::stop, nb::arg("vt_symbol"))
+        .def("stop_all", &algo::TWAPAlgo::stop_all);
+
+    nb::class_<algo::VPAlgo>(m, "VPAlgo")
+        .def(nb::init<BaseStrategy*>(), nb::arg("strategy"),
+             "绑定一个策略实例（传入 self）")
+        .def("start", &algo::VPAlgo::start,
+             nb::arg("vt_symbol"), nb::arg("target_pos"),
+             nb::arg("price") = 0.0, nb::arg("slip_point") = 0,
+             nb::arg("chase_time") = 30.0, nb::arg("n_intervals") = 3,
+             nb::arg("epochs") = 8,
+             nb::arg("volume_profile") = std::vector<double>{},
+             "启动 VWAP：按 volume_profile 占比拆单（缺省均分）")
+        .def("on_timer", &algo::VPAlgo::on_timer, nb::arg("now_ms"))
+        .def("is_active", &algo::VPAlgo::is_active, nb::arg("vt_symbol"))
+        .def("stop", &algo::VPAlgo::stop, nb::arg("vt_symbol"))
+        .def("stop_all", &algo::VPAlgo::stop_all);
+
+    nb::class_<algo::IcebergAlgo>(m, "IcebergAlgo")
+        .def(nb::init<BaseStrategy*>(), nb::arg("strategy"),
+             "绑定一个策略实例（传入 self）")
+        .def("start", &algo::IcebergAlgo::start,
+             nb::arg("vt_symbol"), nb::arg("target_pos"),
+             nb::arg("price") = 0.0, nb::arg("slip_point") = 0,
+             nb::arg("chase_time") = 10.0, nb::arg("n_intervals") = 5,
+             nb::arg("epochs") = 8,
+             "启动冰山算法：大单拆小单逐笼下，不追价")
+        .def("on_timer", &algo::IcebergAlgo::on_timer, nb::arg("now_ms"))
+        .def("is_active", &algo::IcebergAlgo::is_active, nb::arg("vt_symbol"))
+        .def("stop", &algo::IcebergAlgo::stop, nb::arg("vt_symbol"))
+        .def("stop_all", &algo::IcebergAlgo::stop_all);
+
+    nb::class_<algo::MidPegAlgo>(m, "MidPegAlgo")
+        .def(nb::init<BaseStrategy*>(), nb::arg("strategy"),
+             "绑定一个策略实例（传入 self）")
+        .def("start", &algo::MidPegAlgo::start,
+             nb::arg("vt_symbol"), nb::arg("target_pos"),
+             nb::arg("price") = 0.0, nb::arg("slip_point") = 0,
+             nb::arg("chase_time") = 10.0, nb::arg("n_intervals") = 3,
+             nb::arg("epochs") = 8,
+             "启动中间价算法：买卖中间价委托，不追价")
+        .def("on_timer", &algo::MidPegAlgo::on_timer, nb::arg("now_ms"))
+        .def("is_active", &algo::MidPegAlgo::is_active, nb::arg("vt_symbol"))
+        .def("stop", &algo::MidPegAlgo::stop, nb::arg("vt_symbol"))
+        .def("stop_all", &algo::MidPegAlgo::stop_all);
 
     // ---------- 实盘主引擎 ----------
     // 暴露 add_gateway / add_strategy / connect_all / start / stop 等，使 Python 也能

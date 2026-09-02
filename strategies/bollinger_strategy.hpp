@@ -50,32 +50,43 @@ public:
         double upper = mid + k_ * sigma;
         double lower = mid - k_ * sigma;
 
+        // 当前策略持仓（持久化自 JSON，重启也能恢复；非账户持仓）
+        double pos = get_strategy_pos(bar.vt_symbol).volume;
+        pos_ = pos;   // 同步到内存，便于日志
+
         // 空仓：触下轨开多，触上轨开空
-        if (pos_ == 0) {
+        if (pos == 0) {
             if (bar.close < lower)
                 buy(bar.vt_symbol, bar.close, fixed_volume_, OrderType::MARKET);
             else if (bar.close > upper)
                 short_(bar.vt_symbol, bar.close, fixed_volume_, OrderType::MARKET);
         }
         // 持多：回到中轨上方平多
-        else if (pos_ > 0 && bar.close > mid) {
+        else if (pos > 0 && bar.close > mid) {
             sell(bar.vt_symbol, bar.close, fixed_volume_, OrderType::MARKET);
         }
         // 持空：回到中轨下方平空
-        else if (pos_ < 0 && bar.close < mid) {
+        else if (pos < 0 && bar.close < mid) {
             cover(bar.vt_symbol, bar.close, fixed_volume_, OrderType::MARKET);
         }
     }
 
     // 成交回调：依据成交方向/开平更新自维护持仓 pos_，并打日志便于核对
     void on_trade(const TradeData& td) override {
+        double old = pos_;
         if (td.direction == Direction::LONG && td.offset == Offset::OPEN) pos_ += td.volume;
         else if (td.direction == Direction::SHORT && td.offset == Offset::OPEN) pos_ -= td.volume;
         else if (td.direction == Direction::LONG && td.offset == Offset::CLOSE) pos_ += td.volume;   // 平空：买回，净持仓回正
         else if (td.direction == Direction::SHORT && td.offset == Offset::CLOSE) pos_ -= td.volume;  // 平多：卖出，净持仓回零
+        // 开仓均价：新开仓时记录成交价；平仓归零时清空（本策略不金字塔加仓，加权可省略）
+        if (old == 0.0 && pos_ != 0.0) avg_price_ = td.price;
+        else if (pos_ == 0.0)            avg_price_ = 0.0;
+        // 持久化到 JSON（按策略名隔离，多策略互不覆盖）
+        save_position(td.vt_symbol, pos_, avg_price_);
         Logger::log(Logger::Level::INFO, name() + " 成交 " + direction_to_str(td.direction) +
                     " @" + std::to_string(td.price) + " vol=" + std::to_string(td.volume) +
-                    " pos=" + std::to_string(pos_));
+                    " pos=" + std::to_string(pos_) +
+                    " avg=" + std::to_string(avg_price_));
     }
 
     // 委托回调：处理拒单等异常，避免无声失败（此处仅记录，不下单重试）
@@ -112,6 +123,7 @@ private:
     double fixed_volume_;
     std::deque<double> closes_;
     double pos_ = 0.0;
+    double avg_price_ = 0.0;   // 开仓均价（持久化到 JSON）
 };
 
 } // namespace ltc

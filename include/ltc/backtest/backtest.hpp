@@ -93,7 +93,10 @@ public:
         return !bars_.empty();
     }
 
-    void add_strategy(std::shared_ptr<BaseStrategy> st) { strategy_ = st; }
+    void add_strategy(std::shared_ptr<BaseStrategy> st) {
+        strategy_ = st;
+        st->set_persist(false);   // 回测只维护内存持仓账本，不写实盘 JSON
+    }
     void set_capital(double c) { capital_ = c; }
     void set_commission(double rate) { commission_rate_ = rate; }
     void set_slippage(double s) { slippage_ = s; }         // 每笔市价滑点(价格单位)
@@ -209,8 +212,8 @@ private:
 
             apply_trade(td);
             o.status = Status::ALLTRADED; o.traded = o.volume; o.price = fill_price;
-            strategy_->on_order(o);
-            strategy_->on_trade(td);
+            strategy_->handle_order(o);
+            strategy_->handle_trade(td);
             pending_.erase(it);
             ++trade_count_;
         }

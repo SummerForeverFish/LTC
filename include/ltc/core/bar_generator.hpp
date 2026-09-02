@@ -106,11 +106,11 @@ public:
     // （触发 on_bar），并以上一笔 tick 开出新 bar。bar.datetime 为该分钟结束时刻
     // （起始+60s，即收口时刻），贴近真实 K 线“以收盘价收口”的语义。
     void update_tick(const TickData& tick) {
+        // 用最新成交价作为 K 线价格（vnpy 默认口径）。
+        // 注意：不要用买卖中间价——整数价位合约(如 rb tick=1)的买卖盘差 1 跳，
+        // 中间价恒为 x.5，既不是整数也不是任何可成交价，会让 close 出现非整数且
+        // 与真实成交价系统性偏移半跳。
         double price = tick.last_price;
-        // 买卖一档均有效时取中间价（vnpy 口径，抹去单边报价噪声）；否则用最新价
-        if (tick.bid_price_1 > 0 && tick.ask_price_1 > 0) {
-            price = (tick.bid_price_1 + tick.ask_price_1) * 0.5;
-        }
         if (price <= 0) return;                       // 无有效价格，丢弃脏 tick
 
         int64_t minute = floor_minute(tick.datetime); // 本笔 tick 所属分钟（起始毫秒）
